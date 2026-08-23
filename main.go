@@ -657,25 +657,30 @@ func renderToolBlock(call apiclient.ToolCall, execErr error) string {
 
 func (m *model) renderConfirmHeader() string {
 	call := m.pending.call
-	path := tools.Describe(call)
+	desc := tools.Describe(call)
 
 	topLine := confirmBlueStyle.Render(strings.Repeat("─", m.width-2))
 	dashedLine := hintStyle.Render(strings.Repeat("- ", (m.width-2)/2))
-	fileName := hintStyle.Render(path)
 
-	var label, body string
+	var label, subtitle, body string
 
 	switch call.Function.Name {
 	case "write_file":
 		label = "Create file"
-		body = m.renderFileLines(path, tools.WriteContent(call))
+		subtitle = desc
+		body = m.renderFileLines(desc, tools.WriteContent(call))
+	case "run_bash":
+		label = "Run Command"
+		subtitle = desc
 	default: // read_file
 		label = "Read File"
+		subtitle = desc
 	}
 
 	styledLabel := confirmBlueStyle.Bold(true).Render(label)
+	styledSubtitle := hintStyle.Render(subtitle)
 
-	lines := []string{topLine, styledLabel, fileName, dashedLine}
+	lines := []string{topLine, styledLabel, styledSubtitle, dashedLine}
 	if body != "" {
 		lines = append(lines, body, dashedLine)
 	}
@@ -684,16 +689,17 @@ func (m *model) renderConfirmHeader() string {
 
 func (m *model) renderConfirmFooter() string {
 	call := m.pending.call
-	path := tools.Describe(call)
+	desc := tools.Describe(call)
 
 	var prompt string
 	switch call.Function.Name {
 	case "write_file":
-		prompt = fmt.Sprintf("Do you want to create %s?", path)
+		prompt = fmt.Sprintf("Do you want to create %s?", desc)
+	case "run_bash":
+		prompt = fmt.Sprintf("Allow Gophie to run: %s?", desc)
 	default:
-		prompt = fmt.Sprintf("Allow Gophie to read %s?", path)
+		prompt = fmt.Sprintf("Allow Gophie to read %s?", desc)
 	}
-
 	options := []string{"Yes", "No"}
 	var optLines []string
 	for i, opt := range options {
