@@ -33,13 +33,13 @@ go build .
 Set your API key as an environment variable:
 
 ```bash
-export OPENCODE_API_KEY="your-api-key-here"
+set OPENCODE_API_KEY="your-api-key-here"
 ```
 
 Then run:
 
 ```bash
-./gophie
+gophie.exe
 ```
 
 Type your request in the input box and press Enter. If Gophie needs to read or write a file to help you, it will show a confirmation prompt first — nothing happens on disk without your approval.
