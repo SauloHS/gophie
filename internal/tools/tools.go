@@ -27,6 +27,12 @@ type BashArgs struct {
 	Command string `json:"command"`
 }
 
+type EditArgs struct {
+	Path      string `json:"path"`
+	OldString string `json:"old_string"`
+	NewString string `json:"new_string"`
+}
+
 const bashTimeout = 120 * time.Second
 
 const maxReadBytes = 200_000
@@ -103,6 +109,54 @@ func RunBash(args BashArgs) (string, error) {
 	return string(output), nil
 }
 
+func EditFile(args EditArgs) error {
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("error getting working dir: %w", err)
+	}
+
+	targetPath := args.Path
+	if !filepath.IsAbs(targetPath) {
+		targetPath = filepath.Join(workDir, targetPath)
+	}
+
+	cleanPath, err := filepath.Abs(filepath.Clean(targetPath))
+	if err != nil {
+		return fmt.Errorf("invalid path %s: %w", args.Path, err)
+	}
+
+	rel, err := filepath.Rel(workDir, cleanPath)
+	if err != nil {
+		return fmt.Errorf("invalid path %s: %w", args.Path, err)
+	}
+
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("cannot edit files outside working directory")
+	}
+
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return fmt.Errorf("error reading file %s: %w", args.Path, err)
+	}
+	content := string(data)
+
+	count := strings.Count(content, args.OldString)
+	if count == 0 {
+		return fmt.Errorf("old_string not found in %s", args.Path)
+	}
+	if count > 1 {
+		return fmt.Errorf("old_string appears %d times in %s, must be unique", count, args.Path)
+	}
+
+	newContent := strings.Replace(content, args.OldString, args.NewString, 1)
+
+	if err := os.WriteFile(cleanPath, []byte(newContent), 0o644); err != nil {
+		return fmt.Errorf("error writing file %s: %w", args.Path, err)
+	}
+
+	return nil
+}
+
 func WriteFile(args WriteArgs) (int, error) {
 	workDir, err := os.Getwd()
 	if err != nil {
@@ -165,6 +219,15 @@ func Execute(call apiclient.ToolCall) (string, error) {
 			return "", fmt.Errorf("error interpreting arguments: %w", err)
 		}
 		return RunBash(args)
+	case "edit_file":
+		var args EditArgs
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+			return "", fmt.Errorf("error interpreting arguments: %w", err)
+		}
+		if err := EditFile(args); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Edited %s successfully.", args.Path), nil
 	default:
 		return "", fmt.Errorf("unknown tool: %s", call.Function.Name)
 	}
@@ -178,9 +241,17 @@ func Describe(call apiclient.ToolCall) string {
 		return parseWriteArgs(call).Path
 	case "run_bash":
 		return parseBashArgs(call).Command
+	case "edit_file":
+		return parseEditArgs(call).Path
 	default:
 		return call.Function.Name
 	}
+}
+
+func parseEditArgs(call apiclient.ToolCall) EditArgs {
+	var args EditArgs
+	_ = json.Unmarshal([]byte(call.Function.Arguments), &args)
+	return args
 }
 
 func parseBashArgs(call apiclient.ToolCall) BashArgs {
@@ -203,6 +274,8 @@ func CallLabel(call apiclient.ToolCall) string {
 		return "Write(" + Describe(call) + ")"
 	case "run_bash":
 		return "Bash(" + Describe(call) + ")"
+	case "edit_file":
+		return "Edit(" + Describe(call) + ")"
 	default:
 		return call.Function.Name + "(" + Describe(call) + ")"
 	}
@@ -229,6 +302,11 @@ func CallResult(call apiclient.ToolCall, execErr error) string {
 			return "Command failed: " + execErr.Error()
 		}
 		return "Command executed sucessfully."
+	case "edit_file":
+		if execErr != nil {
+			return "Edit failed: " + execErr.Error()
+		}
+		return "File edited successfully."
 	default:
 		if execErr != nil {
 			return "failed: " + execErr.Error()
@@ -248,7 +326,41 @@ func AllTools() []apiclient.Tool {
 		readTool(),
 		writeTool(),
 		bashTool(),
+		editTool(),
 	}
+}
+
+func editTool() apiclient.Tool {
+	return apiclient.Tool{
+		Type: "function",
+		Function: apiclient.ToolFunction{
+			Name:        "edit_file",
+			Description: "Replaces an exact, unique block of text in an existing file with new text. The old_string must match the file content exactly (including whitespace) and appear exactly once — use this instead of write_file when making a small change to an existing file, to avoid rewriting the whole content.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path": map[string]any{
+						"type":        "string",
+						"description": "Path of the file to edit, relative to current working dir.",
+					},
+					"old_string": map[string]any{
+						"type":        "string",
+						"description": "The exact text to find and replace. Must be unique within the file.",
+					},
+					"new_string": map[string]any{
+						"type":        "string",
+						"description": "The text to replace old_string with.",
+					},
+				},
+				"required": []string{"path", "old_string", "new_string"},
+			},
+		},
+	}
+}
+
+func EditPreview(call apiclient.ToolCall) (string, string) {
+	args := parseEditArgs(call)
+	return args.OldString, args.NewString
 }
 
 func writeTool() apiclient.Tool {

@@ -431,7 +431,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.confirming = true
 		m.pending = msg
-		if strings.TrimSpace(msg.precedingText) != "" {
+		if msg.callIndex == 0 && strings.TrimSpace(msg.precedingText) != "" {
 			rendered, err := m.mdRenderer.Render(msg.precedingText)
 			if err != nil {
 				rendered = msg.precedingText
@@ -669,6 +669,10 @@ func (m *model) renderConfirmHeader() string {
 		label = "Create file"
 		subtitle = desc
 		body = m.renderFileLines(desc, tools.WriteContent(call))
+	case "edit_file":
+		label = "Edit file"
+		subtitle = desc
+		body = m.renderEditDiff(call)
 	case "run_bash":
 		label = "Run Command"
 		subtitle = desc
@@ -687,6 +691,19 @@ func (m *model) renderConfirmHeader() string {
 	return strings.Join(lines, "\n")
 }
 
+func (m *model) renderEditDiff(call apiclient.ToolCall) string {
+	oldStr, newStr := tools.EditPreview(call)
+
+	var b strings.Builder
+	for _, line := range strings.Split(oldStr, "\n") {
+		b.WriteString(toolErrStyle.Render("- "+line) + "\n")
+	}
+	for _, line := range strings.Split(newStr, "\n") {
+		b.WriteString(toolOkStyle.Render("+ "+line) + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func (m *model) renderConfirmFooter() string {
 	call := m.pending.call
 	desc := tools.Describe(call)
@@ -697,6 +714,8 @@ func (m *model) renderConfirmFooter() string {
 		prompt = fmt.Sprintf("Do you want to create %s?", desc)
 	case "run_bash":
 		prompt = fmt.Sprintf("Allow Gophie to run: %s?", desc)
+	case "edit_file":
+		prompt = fmt.Sprintf("Do you want to edit %s?", desc)
 	default:
 		prompt = fmt.Sprintf("Allow Gophie to read %s?", desc)
 	}
