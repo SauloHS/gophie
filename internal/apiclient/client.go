@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 )
 
-const baseURL = "https://opencode.ai/zen/v1/chat/completions"
+const apiBase = "https://opencode.ai/zen/v1"
+const baseURL = apiBase + "/chat/completions"
 
 type Client struct {
 	apiKey     string
@@ -78,4 +80,61 @@ func (c *Client) Chat(ctx context.Context, messages []Message, model string, too
 	}
 
 	return &chatResponse, nil
+}
+
+// Models lists the model ids available on the API.
+func (c *Client) Models(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", apiBase+"/models", nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned error: %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var parsed struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
+		return nil, fmt.Errorf("error parsing response: %w", err)
+	}
+
+	models := make([]string, 0, len(parsed.Data))
+	for _, m := range parsed.Data {
+		if m.ID != "" {
+			models = append(models, m.ID)
+		}
+	}
+
+	if len(models) == 0 { // fallback: some APIs return a bare array
+		var arr []struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(bodyBytes, &arr) == nil {
+			for _, m := range arr {
+				if m.ID != "" {
+					models = append(models, m.ID)
+				}
+			}
+		}
+	}
+
+	sort.Strings(models)
+	return models, nil
 }

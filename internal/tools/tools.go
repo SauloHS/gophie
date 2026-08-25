@@ -5,13 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"gophie/internal/apiclient"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 type ReadArgs struct {
@@ -33,9 +37,94 @@ type EditArgs struct {
 	NewString string `json:"new_string"`
 }
 
+type GrepArgs struct {
+	Pattern     string `json:"pattern"`
+	FilePattern string `json:"file_pattern"`
+}
+
+const maxGrepResults = 100
+
+type GrepMatch struct {
+	Path string
+	Line int
+	Text string
+}
+
+func GrepFiles(args GrepArgs) ([]GrepMatch, error) {
+	workDir, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("error getting working dir: %w", err)
+	}
+
+	re, err := regexp.Compile(args.Pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regex pattern %s: %w", args.Pattern, err)
+	}
+
+	filePattern := args.FilePattern
+	if filePattern == "" {
+		filePattern = "**/*"
+	}
+
+	fsys := os.DirFS(workDir)
+	files, err := doublestar.Glob(fsys, filePattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid file_pattern %s: %w", filePattern, err)
+	}
+
+	var matches []GrepMatch
+	for _, relPath := range files {
+		info, err := fs.Stat(fsys, relPath)
+		if err != nil || info.IsDir() {
+			continue
+		}
+
+		data, err := fs.ReadFile(fsys, relPath)
+		if err != nil {
+			continue
+		}
+
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
+			if re.MatchString(line) {
+				matches = append(matches, GrepMatch{Path: relPath, Line: i + 1, Text: line})
+				if len(matches) >= maxGrepResults {
+					return matches, nil
+				}
+			}
+		}
+	}
+
+	return matches, nil
+}
+
 const bashTimeout = 120 * time.Second
 
 const maxReadBytes = 200_000
+
+type GlobArgs struct {
+	Pattern string `json:"pattern"`
+}
+
+const maxGlobResults = 200
+
+func GlobFiles(args GlobArgs) ([]string, error) {
+	workDir, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("error getting working dir: %w", err)
+	}
+
+	matches, err := doublestar.Glob(os.DirFS(workDir), args.Pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid pattern %s: %w", args.Pattern, err)
+	}
+
+	if len(matches) > maxGlobResults {
+		matches = matches[:maxGlobResults]
+	}
+
+	return matches, nil
+}
 
 func ReadFile(args ReadArgs) (string, int, error) {
 	workDir, err := os.Getwd()
@@ -228,6 +317,37 @@ func Execute(call apiclient.ToolCall) (string, error) {
 			return "", err
 		}
 		return fmt.Sprintf("Edited %s successfully.", args.Path), nil
+	case "glob_files":
+		var args GlobArgs
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+			return "", fmt.Errorf("error interpreting arguments: %w", err)
+		}
+		matches, err := GlobFiles(args)
+		if err != nil {
+			return "", err
+		}
+		if len(matches) == 0 {
+			return "No files matched.", nil
+		}
+		return strings.Join(matches, "\n"), nil
+
+	case "grep_files":
+		var args GrepArgs
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+			return "", fmt.Errorf("error interpreting arguments: %w", err)
+		}
+		matches, err := GrepFiles(args)
+		if err != nil {
+			return "", err
+		}
+		if len(matches) == 0 {
+			return "No matches found.", nil
+		}
+		var b strings.Builder
+		for _, mtch := range matches {
+			fmt.Fprintf(&b, "%s:%d: %s\n", mtch.Path, mtch.Line, mtch.Text)
+		}
+		return strings.TrimRight(b.String(), "\n"), nil
 	default:
 		return "", fmt.Errorf("unknown tool: %s", call.Function.Name)
 	}
@@ -243,9 +363,25 @@ func Describe(call apiclient.ToolCall) string {
 		return parseBashArgs(call).Command
 	case "edit_file":
 		return parseEditArgs(call).Path
+	case "glob_files":
+		return parseGlobArgs(call).Pattern
+	case "grep_files":
+		return parseGrepArgs(call).Pattern
 	default:
 		return call.Function.Name
 	}
+}
+
+func parseGlobArgs(call apiclient.ToolCall) GlobArgs {
+	var args GlobArgs
+	_ = json.Unmarshal([]byte(call.Function.Arguments), &args)
+	return args
+}
+
+func parseGrepArgs(call apiclient.ToolCall) GrepArgs {
+	var args GrepArgs
+	_ = json.Unmarshal([]byte(call.Function.Arguments), &args)
+	return args
 }
 
 func parseEditArgs(call apiclient.ToolCall) EditArgs {
@@ -276,6 +412,10 @@ func CallLabel(call apiclient.ToolCall) string {
 		return "Bash(" + Describe(call) + ")"
 	case "edit_file":
 		return "Edit(" + Describe(call) + ")"
+	case "glob_files":
+		return "Glob(" + Describe(call) + ")"
+	case "grep_files":
+		return "Grep(" + Describe(call) + ")"
 	default:
 		return call.Function.Name + "(" + Describe(call) + ")"
 	}
@@ -307,6 +447,18 @@ func CallResult(call apiclient.ToolCall, execErr error) string {
 			return "Edit failed: " + execErr.Error()
 		}
 		return "File edited successfully."
+	case "glob_files":
+		if execErr != nil {
+			return "Glob failed: " + execErr.Error()
+		}
+		matches, _ := GlobFiles(parseGlobArgs(call))
+		return fmt.Sprintf("Found %d file(s).", len(matches))
+	case "grep_files":
+		if execErr != nil {
+			return "Grep failed: " + execErr.Error()
+		}
+		matches, _ := GrepFiles(parseGrepArgs(call))
+		return fmt.Sprintf("Found %d match(es).", len(matches))
 	default:
 		if execErr != nil {
 			return "failed: " + execErr.Error()
@@ -327,6 +479,8 @@ func AllTools() []apiclient.Tool {
 		writeTool(),
 		bashTool(),
 		editTool(),
+		globTool(),
+		grepTool(),
 	}
 }
 
@@ -422,6 +576,50 @@ func bashTool() apiclient.Tool {
 					},
 				},
 				"required": []string{"command"},
+			},
+		},
+	}
+}
+
+func globTool() apiclient.Tool {
+	return apiclient.Tool{
+		Type: "function",
+		Function: apiclient.ToolFunction{
+			Name:        "glob_files",
+			Description: "Finds files matching a glob pattern (supports ** for recursive directory search, e.g. **/*.go). Returns matching file paths relative to the working directory.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{
+						"type":        "string",
+						"description": "Glob pattern to match, e.g. '**/*.go' or 'src/*.ts'.",
+					},
+				},
+				"required": []string{"pattern"},
+			},
+		},
+	}
+}
+
+func grepTool() apiclient.Tool {
+	return apiclient.Tool{
+		Type: "function",
+		Function: apiclient.ToolFunction{
+			Name:        "grep_files",
+			Description: "Searches file contents for a regex pattern. Optionally restrict to files matching file_pattern (glob, supports **). Returns matching lines as path:line: content.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{
+						"type":        "string",
+						"description": "Regular expression to search for.",
+					},
+					"file_pattern": map[string]any{
+						"type":        "string",
+						"description": "Optional glob pattern to restrict which files are searched, e.g. '**/*.go'. Defaults to all files.",
+					},
+				},
+				"required": []string{"pattern"},
 			},
 		},
 	}

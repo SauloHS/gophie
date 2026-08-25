@@ -11,7 +11,7 @@ Gophie's implementation (UI layout, code, prompts, tool-calling logic) is origin
 Gophie is a TUI (terminal user interface) that lets you chat with an LLM and lets it read and write files in your working directory, with your explicit confirmation before any file operation runs.
 
 - Chat interface with Markdown rendering (via [Glamour](https://github.com/charmbracelet/glamour))
-- Tool calling: `read_file`, `write_file` and `run_bash`.
+- Tool calling: `read_file`, `write_file`, `run_bash`, `edit_file`, `glob_files` and `grep_files`.
 - Explicit, interactive confirmation before any task. You always approve or deny before anything touches disk
 - Syntax-highlighted file previews before confirming a write
 
